@@ -1,141 +1,121 @@
-# Agent Layer – MCP‑first, backend‑agnostic
+# FSM MCP Client
 
-A lean agent runtime that orchestrates **multiple agents per session** and uses **MCP (Model Context Protocol)** as the single IO surface (tools, prompts, resources). The system is intentionally **provider‑agnostic**: concrete model runtimes (e.g., Ollama, OpenAI, Claude) are integrated via adapters without changing the core.
+> **Note:** This repository contains the reference client implementation (Agent Layer) for the **FSM MCP Python SDK**. It is designed as a server-centric, adapter-based architecture to connect Large Language Models (LLMs) with state-aware MCP servers.
 
----
+## About this Project
 
-## Purpose (meta)
+This project implements the **Agent Layer** described in the associated Master's thesis (December 2025). It addresses two specific challenges in the MCP ecosystem:
 
-* Provide a stable, model‑agnostic layer around MCP for conversational agents.
-* Keep UI/API consumers simple: a session interface with streaming callbacks and a unified way to execute MCP requests.
-* Isolate provider specifics behind a narrow adapter contract so swaps or additions do not ripple through the codebase.
+1.  **Provider Independence:** It utilizes an adapter architecture to support local LLM providers. Currently, **Ollama** is the supported provider for function calling.
+2.  **Server-Centric Logic:** It ensures that all business logic and process constraints remain on the MCP server. The client acts solely as a manager for the LLM, the session, and user interaction, without replicating the server's state machine.
 
----
+## Architecture
 
-## Design principles
+The architecture relies on the **Adapter Pattern** to decouple the specific requirements of an LLM provider from the standardized MCP protocol.
 
-* **Single protocol surface**: All tool/prompt/resource interactions go through MCP.
-* **Separation of concerns**:
+### 1\. The Adapter Layer
 
-  * *AgentManager* handles session lifecycle, streaming callbacks, and the execution of MCP requests.
-  * *Adapter* translates between provider features (function calling, schemas, content forms) and MCP, in both directions.
-  * *MCP client* speaks MCP only and publishes capability changes.
-* **Non‑intrusive artifacts**: large binaries (files, audio, images) are routed to the consumer/UI and do not enter the agent context by default.
-* **Composable extension**: providers are added by implementing the same adapter contract; the manager and client remain unchanged.
+The core of this repository is the `MCPAdapter` class. It acts as the bridge between the proprietary API of the LLM (wrapped in a `BaseAgent`) and the standard `MCPClient`. It encapsulates three specialized mappers:
 
----
+  * **CallTranslator:** Extracts tool calls from the LLM's raw payload and translates them into MCP-compliant JSON-RPC requests.
+  * **ToolMapper:** Converts standard MCP tool signatures into the specific schema required by the LLM provider.
+  * **ContentMapper:** Transforms MCP `ServerResult` objects back into provider-specific message formats for the chat history.
 
-## Role boundaries (conceptual)
+This design ensures that the `MCPClient` remains generic and unaware of the specific LLM API being used.
 
-* **AgentManager**
+### 2\. Turn-Based Message Processing
 
-  * Owns sessions and coordinates message flow.
-  * Emits streaming callbacks (thinking/content/tool‑call/completion).
-  * Executes MCP requests and forwards results for mapping.
-* **Adapter (per provider)**
+To handle the asynchronous nature of tool execution and state changes, the client uses a strictly **turn-based message model**.
 
-  * Receives capability updates from the MCP client.
-  * Exposes provider tool specifications to the agent when required.
-  * Translates provider tool calls → MCP requests and MCP results → agent messages vs. UI artifacts.
-* **MCP client**
+Each `AgentSession` maintains an asynchronous message queue. The processing logic distinguishes between two types of turns:
 
-  * Lists/calls tools, prompts, resources.
-  * Caches capabilities and notifies adapters on change.
+  * **User Turn:** Triggered by a text message from the user.
+  * **Tool Turn:** Triggered by results returning from the MCP server (which may contain multiple tool results if the agent executed parallel calls).
 
----
+### 3\. State Awareness
 
-## Runtime flows (abstract)
+Unlike standard clients, this implementation is designed to interact with **State-Aware MCP Servers**. The client does not replicate the server's state machine. Instead, it reacts to state changes:
 
-* **Capabilities**: MCP client loads capabilities → adapter updates its internal maps (wired by the manager) → agent can include current tool specs in provider calls when applicable.
-* **Tool calls**: agent returns content/thinking and provider‑native tool calls → adapter emits MCP requests → manager executes via MCP client → adapter maps results to agent messages and UI artifacts → manager issues callbacks.
+  * **Reactive Updates:** The client listens for notifications. When triggered, the adapter refreshes its internal capability cache and informs the agent.
+  * **Error Tolerance:** If the agent attempts to call a tool that is no longer available (due to a state transition on the server), the client catches the error and feeds it back to the agent, allowing the LLM to self-correct.
 
-## Turn orchestration & auto‑continue (conceptual)
+## Setup and Installation
 
-* The manager uses a message queue per session to drive the conversation loop.
-* A user message enqueues a turn; the agent produces content and/or tool calls.
-* When tool calls execute, their results are appended as messages and **automatically enqueue a follow‑up turn**, allowing the agent to decide whether to respond, call another tool, or stop.
-* This enables **semi‑autonomous** operation: human ↔ agent turns when no tools are needed; agent‑driven follow‑ups when tools are involved.
-* UI callbacks (thinking/content/tool‑call/completion) reflect each step; large artifacts bypass the agent and are surfaced directly to the consumer.
+**Prerequisites:** Python **3.13.2** is required.
 
----
+### 1\. Environment Setup
 
-## Configuration & extensibility (meta)
+It is strictly recommended to use a virtual environment to manage dependencies.
 
-* Provider is selected per session; the same manager and client are reused.
-* Adapters define how provider options/messages are represented internally; the base agent exposes generic hooks to carry these without prescribing formats.
+**Windows:**
 
----
+```powershell
+# Create virtual environment
+py -3.13 -m venv .venv
 
-## Error handling & observability (meta)
-
-* Clear, actionable errors for unmapped tools/prompts/resources.
-* Structured logging at adapter and manager boundaries; no sensitive payloads in logs.
-* Fail‑closed defaults for unknown content types (treated as artifacts).
-
----
-
-## Adapter pattern (at a glance)
-
-```
-Client (CLI / API)
-        │
-        ▼
-  AgentManager  ── manages ──►  Session
-        │                         │
-        │                         ├─ Agent (provider impl)
-        │                         │
-        │                         ├─ Adapter (per provider)
-        │                         │     ├─ maps provider tool_calls → MCP requests
-        │                         │     └─ maps MCP results → agent messages / UI artifacts
-        │                         │
-        │                         └─ MCPClient (per session) ⇄ MCP Server
-        │
-        └─ UI callbacks (thinking/content/tool‑call/completion, file‑handler)
+# Activate virtual environment
+.venv\Scripts\activate
 ```
 
-Flow summary:
+**Linux/macOS:**
 
-* **Requests**: provider tool_calls → adapter → AgentManager → MCPClient → MCP server.
-* **Results**: MCP server → MCPClient → AgentManager → adapter → (agent messages + UI artifacts).
+```bash
+# Create virtual environment
+python3.13 -m venv .venv
 
-Only the **MCPClient** communicates with the MCP server; the adapter never calls the server directly.
+# Activate virtual environment
+source .venv/bin/activate
+```
 
-## AgentManager & session management (conceptual)
+### 2\. Install Dependencies
 
-1. **Session creation**: a provider is selected; the manager constructs the provider agent and the matching adapter, then wires the adapter to capability updates from the MCP client.
-2. **Turn handling**: for each user message the agent produces streaming **content/thinking** and provider‑native **tool calls**.
-3. **Tool execution**: the manager forwards tool calls to the adapter, which emits MCP requests; the manager executes them through the MCP client.
-4. **Result mapping**: the adapter splits MCP responses into agent messages vs. UI artifacts (bypass). The manager appends agent messages to the conversation and emits callbacks for artifacts/content/thinking/completion.
-5. **Isolation**: provider swaps do not affect the manager or MCP client; only the adapter and agent change.
+Once the virtual environment is active, install the required packages using the provided `requirements.txt`.
 
----
+```bash
+pip install -r requirements.txt
+```
 
-## Entry points (CLI & API)
+## Configuration
 
-* **CLI**: interactive loop that sends user input to the manager and renders streaming callbacks in-place. Supported callbacks: **thinking**, **content**, **tool-call**, **completion**. Artifacts (e.g., files/blobs) are emitted via a **file‑handler callback** for direct UI rendering, bypassing the agent context.
-* **API**: service endpoints expose the same session abstraction and callback model. Streaming transports forward deltas for **thinking/content/tool‑call/completion**; artifacts are surfaced through the file‑handler path for clients to fetch or display.
+The client configuration is managed via files located in:
+`src/config/default/`
 
-Both entry points share the same core: *AgentManager + Adapter + MCPClient*. Provider selection is a session parameter.
+## Usage
 
----
+### Command Line Interface (CLI)
 
-## MCP client capabilities (current & planned)
+The recommended way to use the client is via the CLI. This provides a terminal-based chat interface to interact with your MCP server.
 
-**Current**
+**Windows:**
 
-* **Tools / Prompts / Resources**: list, call, and read via MCP.
-* **Server‑initiated Sampling**: the MCP server can request a sampling operation on the client; results are returned to the server.
-* **Transactions (custom extension)**: the server can open/commit/abort a transaction; pending changes (e.g., system prompt or messages) are applied only on **commit** and discarded on **abort**. Requires server support.
+```powershell
+py -m src.cli.main
+```
 
-**Planned**
+**Linux/macOS:**
 
-* **Notifications**, **Logins**, **Elicitation** (design placeholders; not implemented).
+```bash
+python -m src.cli.main
+```
 
----
+### API (Experimental)
 
-## Notes
+The repository also includes a FastAPI implementation.
+*Note: The API is currently experimental and has not been fully tested.*
 
-* Keep provider temperatures conservative for function/tool calling when argument stability matters.
-* Schema validation for tool arguments is recommended on the client side in addition to MCP server validation.
+**Windows:**
 
----
+```powershell
+py -m src.api.main
+```
+
+**Linux/macOS:**
+
+```bash
+python -m src.api.main
+```
+
+## Further Resources
+
+  * **Server SDK:** To build the corresponding server, see the [fsm-mcp-python-sdk](https://github.com/TobiWan1995/fsm-mcp-python-sdk).
+  * **Examples:** Complete end-to-end scenarios are available in [fsm-mcp-examples](https://github.com/TobiWan1995/fsm-mcp-examples).
