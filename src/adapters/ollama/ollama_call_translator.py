@@ -14,7 +14,7 @@ from src.adapters.call_translator import MCPCallTranslator
 class OllamaCallTranslator(MCPCallTranslator):
     """
     Translates Ollama tool_call payloads into MCP JSON-RPC requests.
-    Uses canonical identifiers: tool name, prompt name, and resource URI.
+    Uses canonical identifiers: tool name and resource URI.
     """
 
     def __init__(
@@ -53,7 +53,6 @@ class OllamaCallTranslator(MCPCallTranslator):
             if not name:
                 continue
             self._prompts_by_name[name] = prompt
-            self._ollama_name_index[name] = ("prompt", name)
 
         for resource in resources or []:
             uri = str(resource.uri or "")
@@ -126,8 +125,6 @@ class OllamaCallTranslator(MCPCallTranslator):
 
         if name in self._tools_by_name:
             return self._make_rpc("tool", name, arguments, rpc_id)
-        if name in self._prompts_by_name:
-            return self._make_rpc("prompt", name, arguments, rpc_id)
         if name in self._resources_by_uri:
             return self._make_rpc("resource", name, arguments, rpc_id)
 
@@ -145,8 +142,6 @@ class OllamaCallTranslator(MCPCallTranslator):
     def _make_rpc(self, kind: str, key: str, arguments: Dict[str, Any], rpc_id: Any) -> Dict[str, Any]:
         if kind == "tool":
             return {"jsonrpc": "2.0", "id": rpc_id, "method": "tools/call", "params": {"name": key, "arguments": arguments}}
-        if kind == "prompt":
-            return {"jsonrpc": "2.0", "id": rpc_id, "method": "prompts/get", "params": {"name": key, "arguments": arguments}}
         if kind == "resource":
             return {"jsonrpc": "2.0", "id": rpc_id, "method": "resources/read", "params": {"uri": key}}
         raise ValueError(f"Unknown capability kind: {kind}")
@@ -171,7 +166,7 @@ class OllamaCallTranslator(MCPCallTranslator):
             return {"_raw": str(arguments)}
 
     def _no_match_error(self, name: str) -> ValueError:
-        candidates = list(self._ollama_name_index.keys()) + list(self._tools_by_name.keys()) + list(self._prompts_by_name.keys()) + list(self._resources_by_uri.keys())
+        candidates = list(self._ollama_name_index.keys()) + list(self._tools_by_name.keys()) + list(self._resources_by_uri.keys())
         suggestions = difflib.get_close_matches(name, candidates, n=3, cutoff=0.6)
         hint = f" (did you mean: {', '.join(suggestions)})" if suggestions else ""
         return ValueError(f"Ollama tool_call '{name}' could not be mapped to an MCP capability{hint}.")

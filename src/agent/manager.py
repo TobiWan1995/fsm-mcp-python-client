@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import mcp.types as types
+from mcp.types import TextContent
 
 from src.adapters.adapter import MCPAdapter
 from src.adapters.provider_registry import create_provider_bundle
@@ -329,6 +330,53 @@ class AgentManager:
         session = self.sessions.get(session_key)
         session.pending_turn.append((message, "user"))
         await self._enqueue_turn(session)
+
+    async def run_prompt(
+        self,
+        user_id: str,
+        chat_id: str,
+        json_rpc: dict[str, Any],
+        *,
+        enqueue: bool = True,
+    ) -> types.GetPromptResult | str:
+        """
+        Execute a prompts/get JSON-RPC request via the session's MCP client.
+        On success (GetPromptResult) and if enqueue=True, the returned prompt
+        messages are enqueued as normal turns for the agent.
+        Returns the raw MCP result (GetPromptResult or error string).
+        """
+        session_key = self.get_session_key(user_id, chat_id)
+        session = self.sessions.get(session_key)
+        if not session:
+            raise ValueError(f"No active session for {session_key}")
+
+        method = json_rpc.get("method")
+        if method != "prompts/get":
+            raise ValueError(f"run_prompt expected method 'prompts/get', got {method!r}")
+
+        result = await session.mcp_client.execute_json_rpc(json_rpc)
+
+        if isinstance(result, types.GetPromptResult) and enqueue:
+            enqueued = False
+            for msg in result.messages or []:
+                role_str = str(msg.role)
+                content = msg.content
+                text: str
+                if isinstance(content, TextContent):
+                    text = content.text or ""
+                else:
+                    text = str(content)
+
+                if not text.strip():
+                    continue
+
+                session.pending_turn.append((text, role_str))
+                enqueued = True
+
+            if enqueued:
+                await self._enqueue_turn(session)
+
+        return result
 
     async def end_session(self, user_id: str, chat_id: str) -> None:
         session_key = self.get_session_key(user_id, chat_id)

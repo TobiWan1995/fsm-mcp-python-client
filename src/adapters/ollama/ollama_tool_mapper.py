@@ -50,18 +50,6 @@ class OllamaToolMapper(MCPToolMapper):
             tools_out.append(spec)
             reverse[name] = ("tool", name)
 
-        for name, prompt in self._prompts_by_name.items():
-            spec = {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": prompt.description,
-                    "parameters": self._prompt_to_schema(prompt),
-                },
-            }
-            tools_out.append(spec)
-            reverse[name] = ("prompt", name)
-
         for uri, resource in self._resources_by_uri.items():
             title = resource.title or ""
             description = resource.description or ""
@@ -93,8 +81,8 @@ class OllamaToolMapper(MCPToolMapper):
         prompt_change: CapabilityChange,
         resource_change: CapabilityChange,
     ) -> str | None:
-        combined_added = tool_change.added + prompt_change.added + resource_change.added
-        combined_removed = tool_change.removed + prompt_change.removed + resource_change.removed
+        combined_added = tool_change.added + resource_change.added
+        combined_removed = tool_change.removed + resource_change.removed
 
         if not combined_added and not combined_removed:
             return None
@@ -102,7 +90,6 @@ class OllamaToolMapper(MCPToolMapper):
         lines: list[str] = ["The list of available tools has been updated.", ""]
         current_tools = (
             list(self._tools_by_name.values())
-            + list(self._prompts_by_name.values())
             + list(self._resources_by_uri.values())
         )
 

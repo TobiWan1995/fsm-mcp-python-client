@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import FormattedText
@@ -18,7 +18,8 @@ class CLICommands:
         self.style = style
 
     async def handle(self, raw_input: str) -> bool:
-        command = raw_input.strip().lower()
+        stripped = raw_input.strip()
+        command = stripped.lower()
         if command == "/help":
             self._print_help()
             return True
@@ -33,6 +34,12 @@ class CLICommands:
             return True
         if command == "/resources":
             await self._list_resources()
+            return True
+        if command == "/prompt":
+            await self._run_prompt_interactive()
+            return True
+        if stripped.lower().startswith("/promptmock"):
+            await self._run_prompt_mock(stripped)
             return True
         return False
 
@@ -81,14 +88,21 @@ class CLICommands:
         session = self.client.session
         if not session:
             return
-        prompts = await session.mcp_client.list_prompts()
+        result = await session.mcp_client.list_prompts()
+        if isinstance(result, str):
+            print_formatted_text(
+                FormattedText([("class:error", f"Error listing prompts: {result}\n")]),
+                style=self.style,
+            )
+            return
+        prompts = result.prompts or []
         print_formatted_text(
             FormattedText([("class:info", f"\nAvailable prompts ({len(prompts)}):\n")]),
             style=self.style,
         )
         for prompt in prompts:
-            name = prompt.get("name", "Unknown")
-            desc = prompt.get("description", "")
+            name = prompt.name or "Unknown"
+            desc = prompt.description or ""
             print_formatted_text(
                 FormattedText([("class:tool", f"  - {name}: {desc}")]),
                 style=self.style,
@@ -112,3 +126,165 @@ class CLICommands:
                 style=self.style,
             )
         print()
+
+    async def _run_prompt_interactive(self) -> None:
+        session = self.client.session
+        agent_manager = getattr(self.client, "agent_manager", None)
+        if not session or not agent_manager:
+            return
+
+        result = await session.mcp_client.list_prompts()
+        if isinstance(result, str):
+            print_formatted_text(
+                FormattedText([("class:error", f"Error listing prompts: {result}\n")]),
+                style=self.style,
+            )
+            return
+
+        prompts = result.prompts or []
+        if not prompts:
+            print_formatted_text(
+                FormattedText([("class:info", "No prompts available.\n")]),
+                style=self.style,
+            )
+            return
+
+        print_formatted_text(
+            FormattedText([("class:info", f"\nAvailable prompts ({len(prompts)}):\n")]),
+            style=self.style,
+        )
+        for idx, prompt in enumerate(prompts, start=1):
+            name = prompt.name or "Unknown"
+            desc = prompt.description or ""
+            line = f"  {idx}) {name}: {desc}"
+            print_formatted_text(FormattedText([("class:tool", line)]), style=self.style)
+        print()
+
+        from prompt_toolkit import prompt as pt_prompt
+
+        choice = pt_prompt("Select prompt (number or name): ").strip()
+        selected = None
+        if choice.isdigit():
+            pos = int(choice) - 1
+            if 0 <= pos < len(prompts):
+                selected = prompts[pos]
+        else:
+            for prompt in prompts:
+                if prompt.name == choice:
+                    selected = prompt
+                    break
+
+        if not selected:
+            print_formatted_text(
+                FormattedText([("class:error", "Invalid selection.\n")]),
+                style=self.style,
+            )
+            return
+
+        args: dict[str, Any] = {}
+        for argument in selected.arguments or []:
+            arg_name = argument.name
+            if not arg_name:
+                continue
+            desc = argument.description or ""
+            required = bool(argument.required)
+
+            label = arg_name
+            if desc:
+                label += f" ({desc})"
+            if required:
+                label += " [required]"
+            label += ": "
+
+            while True:
+                value = pt_prompt(label).strip()
+                if not value and required:
+                    print_formatted_text(
+                        FormattedText([("class:error", "This field is required.\n")]),
+                        style=self.style,
+                    )
+                    continue
+                if value:
+                    args[arg_name] = value
+                break
+
+        prompt_name = selected.name
+        if not prompt_name:
+            print_formatted_text(
+                FormattedText([("class:error", "Selected prompt is missing a name.\n")]),
+                style=self.style,
+            )
+            return
+
+        json_rpc = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "prompts/get",
+            "params": {
+                "name": prompt_name,
+                "arguments": args,
+            },
+        }
+
+        await agent_manager.run_prompt(
+            user_id="cli_user",
+            chat_id="cli_chat",
+            json_rpc=json_rpc,
+            enqueue=True,
+        )
+
+        print_formatted_text(
+            FormattedText([("class:info", "Prompt enqueued.\n")]),
+            style=self.style,
+        )
+
+    async def _run_prompt_mock(self, raw_command: str) -> None:
+        parts = raw_command.split(maxsplit=1)
+        if len(parts) != 2:
+            print_formatted_text(
+                FormattedText([("class:error", "Usage: /promptmock <key>\n")]),
+                style=self.style,
+            )
+            return
+
+        key = parts[1].strip()
+        if not key:
+            print_formatted_text(
+                FormattedText([("class:error", "Usage: /promptmock <key>\n")]),
+                style=self.style,
+            )
+            return
+
+        try:
+            from mock_prompts import MOCK_PROMPT_CALLS
+        except ImportError:
+            print_formatted_text(
+                FormattedText([("class:error", "mock_prompts.py not found.\n")]),
+                style=self.style,
+            )
+            return
+
+        json_rpc = MOCK_PROMPT_CALLS.get(key)
+        if not json_rpc:
+            print_formatted_text(
+                FormattedText([("class:error", f"No mock prompt '{key}'\n")]),
+                style=self.style,
+            )
+            return
+
+        session = self.client.session
+        agent_manager = getattr(self.client, "agent_manager", None)
+        if not session or not agent_manager:
+            return
+
+        await agent_manager.run_prompt(
+            user_id="cli_user",
+            chat_id="cli_chat",
+            json_rpc=json_rpc,
+            enqueue=True,
+        )
+
+        print_formatted_text(
+            FormattedText([("class:info", "Mock prompt enqueued.\n")]),
+            style=self.style,
+        )
