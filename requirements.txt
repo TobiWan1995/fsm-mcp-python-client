@@ -1,0 +1,29 @@
+
+# Core dependencies
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+
+# Git dependency
+mcp
+
+# Ollama client
+ollama
+
+# Async and utilities
+asyncio
+aiofiles
+
+# CLI interface
+prompt-toolkit
+
+# WebSocket support
+websockets
+
+# Logging and monitoring
+python-json-logger
+
+# Testing
+pytest
+pytest-asyncio

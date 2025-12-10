@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run MCP Client (HTTP)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "src.cli.main",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "PYTHONASYNCIODEBUG": "1"
+      }
+    }
+  ]
+}
+
+
